@@ -1,0 +1,7 @@
+Variation on the Maple SDFat Library developed by Pol Pla i Conesa (polpla@gmail.com)
+
+This repository contains a variation on the SDFat Library for the Maple. It speeds up the SPI transfer rate by means 
+of using DMA (Direct Memory Access). The current implementation does so for reading data from SD cards, but it still
+does not implement fast write. Please let me know if you would like to contribute or improve upon this code!
+
+Hope it is helpful!
