@@ -1,6 +1,8 @@
 #include "Sd2Card.h"
 
+#define DO_DMA_WRITE
 bool dmaActive;
+uint8_t mysink[1];
 
 inline void DMAEvent(){
     dma_irq_cause event = dma_get_irq_cause(DMA1, DMA_CH3);
@@ -15,6 +17,7 @@ inline void DMAEvent(){
             break;
     }
 }
+
 
 Sd2Card::Sd2Card() : errorCode_(0), inBlock_(0), partialBlockRead_(0), type_(0), HardwareSPI(1) {
     this->begin(SPI_18MHZ, MSBFIRST, 0);
@@ -31,7 +34,8 @@ Sd2Card::Sd2Card() : errorCode_(0), inBlock_(0), partialBlockRead_(0), type_(0),
 }
 
 void Sd2Card::spiSend(uint8_t b) {
-	this->write(b);
+	this->transfer(b);   // thd write to transfer
+//	this->write(b);  
 }
 
 uint8_t Sd2Card::spiRec(void)  {
@@ -43,7 +47,7 @@ uint8_t Sd2Card::cardCommand(uint8_t cmd, uint32_t arg) {
     CS0;
     waitNotBusy(300);
     
-    spiSend(cmd);
+    spiSend(cmd );
 
     spiSend(arg >> 24);
     spiSend(arg >> 16);
@@ -217,7 +221,7 @@ uint8_t Sd2Card::readData(uint32_t block, uint16_t offset, uint16_t count, uint8
     // skip data before offset
     if(offset_ < offset){
         dma_setup_transfer(DMA1, DMA_CH3, &SPI1->regs->DR, DMA_SIZE_8BITS, ack, DMA_SIZE_8BITS,
-                           (DMA_MINC_MODE | DMA_CIRC_MODE | DMA_FROM_MEM | DMA_TRNS_CMPLT | DMA_TRNS_ERR));
+                           (/*DMA_MINC_MODE | DMA_CIRC_MODE  |*/ DMA_FROM_MEM | DMA_TRNS_CMPLT | DMA_TRNS_ERR));
         dma_attach_interrupt(DMA1, DMA_CH3, DMAEvent);
         dma_set_priority(DMA1, DMA_CH3, DMA_PRIORITY_VERY_HIGH);
         dma_set_num_transfers(DMA1, DMA_CH3, offset - offset_);
@@ -235,7 +239,7 @@ uint8_t Sd2Card::readData(uint32_t block, uint16_t offset, uint16_t count, uint8
                        (DMA_MINC_MODE | DMA_TRNS_CMPLT | DMA_TRNS_ERR));
     dma_attach_interrupt(DMA1, DMA_CH2, DMAEvent);
     dma_setup_transfer(DMA1, DMA_CH3, &SPI1->regs->DR, DMA_SIZE_8BITS, ack, DMA_SIZE_8BITS,
-                       (DMA_MINC_MODE | DMA_CIRC_MODE | DMA_FROM_MEM));             
+                       (/*DMA_MINC_MODE | DMA_CIRC_MODE |*/ DMA_FROM_MEM));             
     dma_set_priority(DMA1, DMA_CH2, DMA_PRIORITY_VERY_HIGH);
     dma_set_priority(DMA1, DMA_CH3, DMA_PRIORITY_VERY_HIGH);
     dma_set_num_transfers(DMA1, DMA_CH2, count);
@@ -264,7 +268,7 @@ fail:
 void Sd2Card::readEnd(void) {
     if (inBlock_) {
         dma_setup_transfer(DMA1, DMA_CH3, &SPI1->regs->DR, DMA_SIZE_8BITS, ack, DMA_SIZE_8BITS,
-                           (DMA_MINC_MODE | DMA_CIRC_MODE | DMA_FROM_MEM | DMA_TRNS_CMPLT | DMA_TRNS_ERR));  
+                           (/*DMA_MINC_MODE | DMA_CIRC_MODE |*/ DMA_FROM_MEM | DMA_TRNS_CMPLT | DMA_TRNS_ERR));  
         dma_attach_interrupt(DMA1, DMA_CH3, DMAEvent);
         dma_set_priority(DMA1, DMA_CH3, DMA_PRIORITY_VERY_HIGH);
         dma_set_num_transfers(DMA1, DMA_CH3, SPI_BUFF_SIZE + 1 - offset_);
@@ -352,7 +356,7 @@ uint8_t Sd2Card::writeBlock(uint32_t blockNumber, const uint8_t* src) {
     if (type() != SD_CARD_TYPE_SDHC) 
         blockNumber <<= 9;
     if (cardCommand(CMD24, blockNumber)) {
-        SerialUSB.println("Error: CMD42");
+        SerialUSB.println("Error: CMD24");
         error(SD_CARD_ERROR_CMD24);
         goto fail;
     }
@@ -393,17 +397,31 @@ uint8_t Sd2Card::writeData(const uint8_t* src) {
 
 uint8_t Sd2Card::writeData(uint8_t token, const uint8_t* src) {
     spiSend(token);
+#ifdef DO_DMA_WRITE
+        dma_setup_transfer(DMA1, DMA_CH3, &SPI1->regs->DR, DMA_SIZE_8BITS, (uint8_t *)src, DMA_SIZE_8BITS, (DMA_MINC_MODE |  DMA_FROM_MEM | DMA_TRNS_CMPLT | DMA_TRNS_ERR));
+        dma_attach_interrupt(DMA1, DMA_CH3, DMAEvent);
+        dma_set_priority(DMA1, DMA_CH3, DMA_PRIORITY_VERY_HIGH);
+        dma_set_num_transfers(DMA1, DMA_CH3, 512);
+
+        dmaActive = true;
+        dma_enable(DMA1, DMA_CH3);
+
+        while(dmaActive) delayMicroseconds(1);
+        dma_disable(DMA1, DMA_CH3);
+#else
     for (uint16_t i = 0; i < 512; i++) {
         spiSend(src[i]);
     }
+#endif
     spiSend(0xff);  // dummy crc
     spiSend(0xff);  // dummy crc
 
-    status_ = spiRec();
+    while((status_ = spiRec()) == 0xff);  // thd catch up hack
     if ((status_ & DATA_RES_MASK) != DATA_RES_ACCEPTED) {
         error(SD_CARD_ERROR_WRITE);
         CS1;
-        SerialUSB.println("Error: Write");
+		SerialUSB.print(status_,HEX);
+        SerialUSB.println(" Error: Write");
         SerialUSB.println("Error: Sd2Card::writeData()");
         return false;
     }
